@@ -1,0 +1,7 @@
+# Machine-local secrets. Never commit.
+#
+# This file is sourced by zshrc if it exists. Put API keys, tokens and
+# anything environment-specific here instead of editing zshrc directly.
+
+# Example:
+# export SUGAR_RPC_URI_8453="https://base-mainnet.g.alchemy.com/v2/your-key-here"

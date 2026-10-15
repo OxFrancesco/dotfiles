@@ -1,0 +1,12 @@
+typeset -U path PATH
+
+export BUN_INSTALL="$HOME/.bun"
+path=(
+  "$BUN_INSTALL/bin"
+  "$HOME/.foundry/bin"
+  $path
+)
+export PATH
+
+# Devin CLI default permission mode
+export DEVIN_PERMISSION_MODE=dangerous

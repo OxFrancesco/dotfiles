@@ -1,0 +1,351 @@
+# --- PATH Setup ---
+export PATH="$BUN_INSTALL/bin:$HOME/.npm-global/bin:$PATH"
+
+# --- Zed CLI ---
+# Keep Zed commands available without shadowing the system Git binary.
+path=(${path:#/Applications/Zed.app/Contents/MacOS})
+path+=("/Applications/Zed.app/Contents/MacOS")
+export PATH
+
+# --- Bun Configuration ---
+# BUN_INSTALL/PATH are set in ~/.zshenv so Bun is available outside interactive shells too.
+[ -s "$BUN_INSTALL/_bun" ] && source "$BUN_INSTALL/_bun"
+
+# --- Solana Install Path ---
+export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+
+# --- The Fuck Alias ---
+# This creates both `fuck` and `tf` aliases.
+eval $(thefuck --alias)
+eval $(thefuck --alias tf)
+
+# --- fzf Integration ---
+eval "$(fzf --zsh)"
+
+# --- eza (ls replacement) Alias ---
+# Corrected incomplete option and ensured proper double hyphens.
+alias ls="eza --color=always --long --git --no-filesize --icons=always --no-time --no-user --no-permissions"
+
+# --- Zoxide for Faster Directory Navigation ---
+eval "$(zoxide init zsh)"
+
+# --- Custom Aliases ---
+alias amp="amp --mode gpt-6-astra-medium"
+alias cld="claude"
+alias cc="claude --dangerously-skip-permissions"
+alias clr="clear"
+alias bd="bun dev"
+alias codex="codex -c model_reasoning_effort="high" --search"
+alias ccd="z"
+alias lls="fzf"
+
+# Open the global Codex and Claude agent rules together in Zed.
+open-agent-rules() {
+  /opt/homebrew/bin/zed \
+    "$HOME/.codex/AGENTS.md" \
+    "$HOME/.claude/CLAUDE.md"
+}
+
+# --- Navigation Shortcut ---
+# Use `move home` to return to the home directory from anywhere.
+move() {
+  case "$1" in
+    home)
+      if (( $# != 1 )); then
+        print -u2 "usage: move home"
+        return 2
+      fi
+      builtin cd -- "$HOME"
+      ;;
+    ''|-h|--help)
+      print "usage: move home"
+      ;;
+    *)
+      print -u2 "move: unknown destination: $1"
+      print -u2 "usage: move home"
+      return 2
+      ;;
+  esac
+}
+
+# --- OpenClaw Shortcut ---
+# Support `openclaw restart` and `openclaw r` as a shortcut for the doctor + fix flow.
+openclaw() {
+  case "$1" in
+    restart|r)
+      if [ "$#" -gt 1 ]; then
+        echo "openclaw: '$1' does not accept extra arguments" >&2
+        return 2
+      fi
+      command openclaw doctor && command openclaw doctor --fix
+      ;;
+    *)
+      command openclaw "$@"
+      ;;
+  esac
+}
+
+# --- tmux Shortcut ---
+# Support `tmux create [session-name]` as a shortcut for `tmux new-session`,
+# and `tmux move <session-name>` to jump to an existing session.
+tmux() {
+  case "$1" in
+    create)
+      shift
+      if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+        echo "usage: tmux create [session-name] [tmux new-session flags]" >&2
+        return 0
+      fi
+
+      if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
+        local session_name="$1"
+        shift
+        command tmux new-session -s "$session_name" "$@"
+      else
+        command tmux new-session "$@"
+      fi
+      ;;
+    move)
+      shift
+      if [ "$1" = "--help" ] || [ "$1" = "-h" ] || [ $# -eq 0 ]; then
+        echo "usage: tmux move <session-name>" >&2
+        return $([ $# -eq 0 ] && echo 2 || echo 0)
+      fi
+
+      local session_name="$1"
+      shift
+
+      if [ -n "$TMUX" ]; then
+        command tmux switch-client -t "$session_name" "$@"
+      else
+        command tmux attach-session -t "$session_name" "$@"
+      fi
+      ;;
+    *)
+      command tmux "$@"
+      ;;
+  esac
+}
+
+# opencode
+export PATH=$HOME/.opencode/bin:$PATH
+
+# --- Private Environment Variables ---
+# Keep machine-local secrets out of version-controlled shell settings.
+[ -f "$HOME/.zshrc.private" ] && source "$HOME/.zshrc.private"
+
+[[ "$TERM_PROGRAM" == "kiro" ]] && . "$(kiro --locate-shell-integration-path zsh)"
+
+# --- Francesco Prompt ---
+# Compact two-line prompt with local Git state and cached GitHub PR context.
+autoload -U colors && colors
+autoload -Uz add-zsh-hook
+setopt PROMPT_SUBST
+
+typeset -g FRANCESCO_PROMPT_RESET=$'%{\e[0m%}'
+typeset -g FRANCESCO_PROMPT_DIM=$'%{\e[2m%}'
+typeset -g FRANCESCO_PROMPT_RED=$'%{\e[38;2;209;0;28m%}'
+typeset -g FRANCESCO_PROMPT_BLUE=$'%{\e[38;2;90;170;255m%}'
+typeset -g FRANCESCO_PROMPT_GREEN=$'%{\e[38;2;80;200;120m%}'
+typeset -g FRANCESCO_PROMPT_YELLOW=$'%{\e[38;2;245;190;70m%}'
+typeset -g FRANCESCO_PROMPT_MAGENTA=$'%{\e[38;2;205;120;255m%}'
+typeset -g FRANCESCO_VCS_SEGMENT=''
+typeset -g FRANCESCO_EXIT_SEGMENT=''
+typeset -g FRANCESCO_GH_CACHE_KEY=''
+typeset -g FRANCESCO_GH_CACHE_INFO=''
+typeset -gi FRANCESCO_GH_CACHE_UPDATED=-999999
+typeset -gi FRANCESCO_GH_CACHE_SECONDS=60
+
+francesco_prompt_update_github() {
+  local repo_root="$1"
+  local branch="$2"
+  local cache_key="${repo_root}:${branch}"
+
+  if [[ "$cache_key" == "$FRANCESCO_GH_CACHE_KEY" ]] &&
+     (( SECONDS - FRANCESCO_GH_CACHE_UPDATED < FRANCESCO_GH_CACHE_SECONDS )); then
+    return
+  fi
+
+  FRANCESCO_GH_CACHE_KEY="$cache_key"
+  FRANCESCO_GH_CACHE_UPDATED=$SECONDS
+  FRANCESCO_GH_CACHE_INFO=''
+
+  (( $+commands[gh] && $+commands[jq] )) || return
+
+  local pr_json parsed
+  pr_json=$(command gh pr list --state open --limit 100 \
+    --json number,headRefName,isDraft 2>/dev/null) || return
+  parsed=$(print -r -- "$pr_json" | command jq -r --arg branch "$branch" '
+    (map(select(.headRefName == $branch)) | first) as $current
+    | [length, ($current.number // 0), ($current.isDraft // false)]
+    | join("|")
+  ' 2>/dev/null) || return
+
+  local -a fields
+  fields=(${(s:|:)parsed})
+  local open_count="${fields[1]:-0}"
+  local current_pr="${fields[2]:-0}"
+  local is_draft="${fields[3]:-false}"
+  local info=''
+
+  if (( current_pr > 0 )); then
+    info+="  ${FRANCESCO_PROMPT_MAGENTA}PR #${current_pr}${FRANCESCO_PROMPT_RESET}"
+    [[ "$is_draft" == true ]] && info+=" ${FRANCESCO_PROMPT_DIM}(draft)${FRANCESCO_PROMPT_RESET}"
+  fi
+  info+="  ${FRANCESCO_PROMPT_DIM}·${FRANCESCO_PROMPT_RESET} ${FRANCESCO_PROMPT_MAGENTA}PRs:${open_count}${FRANCESCO_PROMPT_RESET}"
+  FRANCESCO_GH_CACHE_INFO="$info"
+}
+
+francesco_prompt_update() {
+  local exit_code=$?
+  FRANCESCO_EXIT_SEGMENT=''
+  FRANCESCO_VCS_SEGMENT=''
+
+  if (( exit_code != 0 )); then
+    FRANCESCO_EXIT_SEGMENT="${FRANCESCO_PROMPT_RED}✘ ${exit_code}${FRANCESCO_PROMPT_RESET}  "
+  fi
+
+  local git_state
+  git_state=$(command git status --porcelain=v2 --branch 2>/dev/null) || return 0
+
+  local branch='' oid=''
+  local -i staged=0 modified=0 untracked=0 conflicts=0 ahead=0 behind=0
+  local line x y ab
+  local -a counts
+
+  for line in ${(f)git_state}; do
+    case "$line" in
+      '# branch.oid '*)
+        oid="${line#\# branch.oid }"
+        ;;
+      '# branch.head '*)
+        branch="${line#\# branch.head }"
+        ;;
+      '# branch.ab '*)
+        ab="${line#\# branch.ab }"
+        counts=(${=ab})
+        ahead="${counts[1]#+}"
+        behind="${counts[2]#-}"
+        ;;
+      '1 '*|'2 '*)
+        x="${line[3]}"
+        y="${line[4]}"
+        [[ "$x" != '.' ]] && (( ++staged ))
+        [[ "$y" != '.' ]] && (( ++modified ))
+        ;;
+      'u '*)
+        (( ++conflicts ))
+        ;;
+      '?'*)
+        (( ++untracked ))
+        ;;
+    esac
+  done
+
+  [[ "$branch" == '(detached)' ]] && branch="${oid[1,7]}"
+  [[ -z "$branch" ]] && branch='unknown'
+  branch="${branch//\%/%%}"
+
+  local segment="${FRANCESCO_PROMPT_DIM}git${FRANCESCO_PROMPT_RESET} ${FRANCESCO_PROMPT_YELLOW}${branch}${FRANCESCO_PROMPT_RESET}"
+  if (( staged == 0 && modified == 0 && untracked == 0 && conflicts == 0 )); then
+    segment+=" ${FRANCESCO_PROMPT_GREEN}✓${FRANCESCO_PROMPT_RESET}"
+  else
+    (( staged > 0 )) && segment+=" ${FRANCESCO_PROMPT_GREEN}+${staged}${FRANCESCO_PROMPT_RESET}"
+    (( modified > 0 )) && segment+=" ${FRANCESCO_PROMPT_YELLOW}~${modified}${FRANCESCO_PROMPT_RESET}"
+    (( untracked > 0 )) && segment+=" ${FRANCESCO_PROMPT_BLUE}?${untracked}${FRANCESCO_PROMPT_RESET}"
+    (( conflicts > 0 )) && segment+=" ${FRANCESCO_PROMPT_RED}!${conflicts}${FRANCESCO_PROMPT_RESET}"
+  fi
+  (( ahead > 0 )) && segment+=" ${FRANCESCO_PROMPT_GREEN}↑${ahead}${FRANCESCO_PROMPT_RESET}"
+  (( behind > 0 )) && segment+=" ${FRANCESCO_PROMPT_RED}↓${behind}${FRANCESCO_PROMPT_RESET}"
+
+  local repo_root
+  repo_root=$(command git rev-parse --show-toplevel 2>/dev/null)
+  francesco_prompt_update_github "$repo_root" "$branch"
+  FRANCESCO_VCS_SEGMENT="${segment}${FRANCESCO_GH_CACHE_INFO}  "
+  return 0
+}
+
+# Run `prompt-refresh` after creating or closing a PR to bypass the 60-second cache.
+prompt-refresh() {
+  FRANCESCO_GH_CACHE_UPDATED=-999999
+  FRANCESCO_GH_CACHE_KEY=''
+}
+
+add-zsh-hook -D precmd francesco_prompt_update 2>/dev/null
+add-zsh-hook precmd francesco_prompt_update
+PROMPT=$'%{\e[2m%}╭─%{\e[0m%} %{\e[38;2;209;0;28m%}%n@%m%{\e[0m%}  %{\e[38;2;90;170;255m%}%~%{\e[0m%}\n%{\e[2m%}╰─%{\e[0m%} ${FRANCESCO_EXIT_SEGMENT}${FRANCESCO_VCS_SEGMENT}%{\e[38;2;209;0;28m%}❯%{\e[0m%} '
+
+# --- Francesco Oddo Terminal Banner ---
+# Show the compact horizontal wordmark once per interactive shell.
+francesco_banner() {
+  [[ -o interactive ]] || return
+  [[ "$FRANCESCO_BANNER_SHELL_PID" == "$$" ]] && return
+  typeset -g FRANCESCO_BANNER_SHELL_PID=$$
+
+  local reset=$'\e[0m'
+  local red=$'\e[38;2;209;0;28m'
+
+  printf '\n%b' "$red"
+  cat <<'EOF'
+█▀▀ █▀█ █▀█ █▄ █ █▀▀ █▀▀ █▀▀ █▀▀ █▀█   █▀█ █▀▄ █▀▄ █▀█
+█▀  █▀▄ █▀█ █ ▀█ █   █▀  ▀▀█ █   █ █   █ █ █ █ █ █ █ █
+▀   ▀ ▀ ▀ ▀ ▀  ▀ ▀▀▀ ▀▀▀ ▀▀▀ ▀▀▀ ▀▀▀   ▀▀▀ ▀▀  ▀▀  ▀▀▀
+EOF
+  printf '%b\n' "$reset"
+}
+francesco_banner
+
+# Added by CodeRabbit CLI installer
+export PATH="$HOME/.local/bin:$PATH"
+
+# --- Agent Session Resume Shortcuts ---
+[[ -f "$HOME/Documents/GitHub/terminal-agent-utils/shell/resume-shortcuts.sh" ]] && \
+  source "$HOME/Documents/GitHub/terminal-agent-utils/shell/resume-shortcuts.sh"
+
+# Added by Antigravity
+export PATH="$HOME/.antigravity/antigravity/bin:$PATH"
+export PATH="$HOME/bin:$PATH"
+source "$HOME/.cargo/env"
+
+# --- Zsh Tab Completion ---
+autoload -Uz compinit
+compinit
+zstyle ':completion:*' menu select
+zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'
+zstyle ':completion:*' format 'Completing %d'
+
+# OpenClaw Completion
+source "$HOME/.openclaw/completions/openclaw.zsh"
+compdef _openclaw openclaw
+
+# Entire CLI shell completion
+if (( $+commands[entire] )); then
+  source <(entire completion zsh)
+fi
+
+# Reuse tmux completion for the wrapper function when available.
+autoload -Uz _tmux 2>/dev/null
+compdef _tmux tmux 2>/dev/null
+
+# Added by Devin
+export PATH="$HOME/.codeium/windsurf/bin:$PATH"
+
+# Android Studio / Expo Android emulator
+export JAVA_HOME="/opt/homebrew/opt/openjdk"
+export ANDROID_HOME="$HOME/Library/Android/sdk"
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+export PATH="$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+
+# >>> grok installer >>>
+export PATH="$HOME/.grok/bin:$PATH"
+fpath=(~/.grok/completions/zsh $fpath)
+autoload -Uz compinit && compinit -C
+# <<< grok installer <<<
+# CF CLI completions
+[[ -f "$HOME/.config/cf/completions/_cf.zsh" ]] && source "$HOME/.config/cf/completions/_cf.zsh"
+
+source $HOME/.daytona.completion_script.zsh
+
+# --- Atuin Shell History ---
+eval "$(atuin init zsh)"
+
